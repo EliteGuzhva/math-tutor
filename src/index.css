@@ -1,0 +1,84 @@
+:root {
+  --bg-gradient-start: #e0c3fc;
+  --bg-gradient-end: #8ec5fc;
+  --card-bg: rgba(255, 255, 255, 0.85);
+  --card-shadow: 0 8px 32px rgba(80, 60, 120, 0.12);
+  --card-radius: 20px;
+  --term-radius: 14px;
+  --font: 'Nunito', sans-serif;
+  --color-success: #22c55e;
+  --color-error: #ef4444;
+  --color-gold: #eab308;
+  --color-equals: #f59e0b;
+  --color-operator: #6b7280;
+  --color-number: #1e293b;
+  --text-primary: #1e1b3a;
+  --text-secondary: #6b7280;
+  --dropzone-idle: rgba(139, 92, 246, 0.08);
+  --dropzone-active: rgba(139, 92, 246, 0.25);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html, body, #root {
+  height: 100%;
+  width: 100%;
+  overflow: hidden;
+}
+
+body {
+  font-family: var(--font);
+  background: linear-gradient(135deg, var(--bg-gradient-start) 0%, var(--bg-gradient-end) 100%);
+  color: var(--text-primary);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  user-select: none;
+  -webkit-user-select: none;
+  touch-action: manipulation;
+}
+
+button {
+  font-family: var(--font);
+  cursor: pointer;
+  border: none;
+  outline: none;
+  -webkit-tap-highlight-color: transparent;
+}
+
+button:focus-visible {
+  outline: 3px solid #a855f7;
+  outline-offset: 2px;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(139, 92, 246, 0.2);
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(139, 92, 246, 0.4);
+}
+
+/* Smooth scrolling */
+* {
+  scroll-behavior: smooth;
+}
+
+/* Prevent text selection on interactive elements */
+.term, .dropzone {
+  user-select: none;
+  -webkit-user-select: none;
+}

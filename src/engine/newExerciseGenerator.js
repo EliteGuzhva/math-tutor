@@ -306,19 +306,19 @@ function generateIsolateLevel4(rng) {
       target,
       ops: ['+', '-', '*'],
     }),
-    // Physics-style: 1/x = 1/a + 1/b pattern (reciprocal formula)
-    // a = b*c/(c+d) → solve for c: many steps with cross-multiplication
+    // ax/(b+c) + dy + ez + f + g = h + k + m
+    // move dy(1), ez(2), f(3), g(4), multiply(b+c)(5), divide a(6) + manage right = 7+ steps
     () => ({
-      left: [vars[1]],
-      right: [c1, '*', target, '/', '(', target, s1, vars[2], ')'],
+      left: [c1, '*', target, '/', '(', vars[1], s1, randCoeff(rng, 1, 5), ')', '+', c2, '*', vars[2], s2, c3, '*', vars[3], s3, randCoeff(rng, 1, 6), s4, vars[4]],
+      right: [vars[5], '+', vars[6], '-', randCoeff(rng, 1, 8)],
       target,
       ops: ['+', '-', '*', '/'],
     }),
-    // a + b + c = d * e / (fx + g) + h + k
-    // 7+ steps to isolate x from denominator plus handle many terms
+    // p + q + r + s + t = ax/(b+c) + d + e + f
+    // move d(1), e(2), f(3) to left, then p,q,r,s,t on left too, multiply(b+c)(4), divide a(5) = 8+ steps
     () => ({
-      left: [vars[1], s1, vars[2], s2, randCoeff(rng, 1, 9)],
-      right: [c1, '*', vars[3], '/', '(', c2, '*', target, s3, vars[4], ')', s4, vars[5], '+', randCoeff(rng, 1, 6)],
+      left: [vars[1], s1, vars[2], s2, vars[3], s3, randCoeff(rng, 1, 7), s4, vars[4]],
+      right: [c1, '*', target, '/', '(', vars[5], '+', randCoeff(rng, 1, 4), ')', '+', vars[6], '-', vars[7], '+', randCoeff(rng, 1, 5)],
       target,
       ops: ['+', '-', '*', '/'],
     }),

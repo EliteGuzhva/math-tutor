@@ -149,6 +149,13 @@ export default function ExpressionView({ exercise, onAction, simplifyDifficulty 
         return;
       }
 
+      // Block moving the target variable across the equals sign
+      if (exercise.targetVar && moveContainsTargetVar(source, moveMeta, exercise.targetVar)) {
+        registerIllegalMove('Мы ищем значение этой переменной! Её нужно оставить на месте. Перенеси другой элемент.');
+        clearDragUiState();
+        return;
+      }
+
       const operationTarget = moveMeta.moveType === 'mul' && from.side !== toSide
         ? moveMeta.operationTarget
         : null;
@@ -1151,6 +1158,22 @@ function randomErrorMessage() {
 
 function isMovablePiece(piece) {
   return piece?.type === 'number' || piece?.type === 'variable';
+}
+
+/**
+ * Check if the move range contains the target variable.
+ * For multiplicative moves: only block if the dragged factor IS the variable itself
+ *   (not a parenthesized group that happens to contain it in the denominator).
+ * For additive moves: block if any piece in the range is the target variable.
+ */
+function moveContainsTargetVar(source, moveMeta, targetVar) {
+  if (!targetVar || !moveMeta?.moveRange) return false;
+  const { start, end } = moveMeta.moveRange;
+  for (let i = start; i <= end; i += 1) {
+    const p = source[i];
+    if (p?.type === 'variable' && p.name === targetVar) return true;
+  }
+  return false;
 }
 
 function shouldShowSign(pieces, index) {

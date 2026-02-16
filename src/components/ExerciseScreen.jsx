@@ -6,15 +6,13 @@ import FractionExercise from './FractionExercise';
 import ExpressionView from './ExpressionView';
 import FeedbackOverlay from './FeedbackOverlay';
 import RulePopup from './RulePopup';
-import ProgressBar from './ProgressBar';
 import Celebration from './Celebration';
 import { generateExerciseSet as generateOldExerciseSet } from '../engine/exerciseGenerator';
-import { generateExerciseSet } from '../engine/newExerciseGenerator';
+import { generateNextExercise } from '../engine/newExerciseGenerator';
 import { validate } from '../engine/validator';
 import { S } from '../utils/strings';
 import { fadeInUp, spring } from '../utils/animations';
 
-const EXERCISES_PER_MODULE = 30; // Changed to 30 for new modules
 const OLD_EXERCISES_PER_MODULE = 8;
 
 const promptForModule = {
@@ -31,16 +29,6 @@ const MULTIPLICATIVE_MODULE = 'moveMultiplicative';
 // Modules rendered by FractionExercise (interactive fraction work)
 const FRACTION_MODULES = new Set(['simplify', 'crossMultiply', 'combineFractions']);
 
-function buildExerciseSet(moduleId, count, simplifyDifficulty = 'normal') {
-  if (moduleId === 'simplifyExpression') {
-    return generateExerciseSet(moduleId, count, { simplifyDifficulty });
-  }
-  if (moduleId === 'isolateVariable') {
-    return generateExerciseSet(moduleId, count);
-  }
-  return generateOldExerciseSet(moduleId, count);
-}
-
 function gcd(a, b) {
   a = Math.abs(a);
   b = Math.abs(b);
@@ -49,13 +37,22 @@ function gcd(a, b) {
 }
 
 export default function ExerciseScreen({ moduleId, onBack }) {
-  // Use new generator for new modules, old generator for legacy modules
   const isNewModule = moduleId === 'isolateVariable' || moduleId === 'simplifyExpression';
-  const exerciseCount = isNewModule ? EXERCISES_PER_MODULE : OLD_EXERCISES_PER_MODULE;
-  const [simplifyDifficulty, setSimplifyDifficulty] = useState('normal');
 
+  // Difficulty level 1-4 for new modules
+  const [difficultyLevel, setDifficultyLevel] = useState(1);
+
+  // For new modules: single current exercise generated on the fly
+  const [exercise, setExercise] = useState(() => {
+    if (isNewModule) {
+      return generateNextExercise(moduleId, 1);
+    }
+    return generateOldExerciseSet(moduleId, OLD_EXERCISES_PER_MODULE);
+  });
+
+  // For legacy modules: array-based
   const [exercises, setExercises] = useState(() =>
-    buildExerciseSet(moduleId, exerciseCount, simplifyDifficulty)
+    isNewModule ? null : generateOldExerciseSet(moduleId, OLD_EXERCISES_PER_MODULE)
   );
   const [currentIdx, setCurrentIdx] = useState(0);
   const [feedback, setFeedback] = useState(null);
@@ -63,62 +60,73 @@ export default function ExerciseScreen({ moduleId, onBack }) {
   const [completed, setCompleted] = useState(false);
   const [solvedCount, setSolvedCount] = useState(0);
 
-  const exercise = exercises[currentIdx];
+  // For legacy modules, exercise comes from array
+  const currentExercise = isNewModule ? exercise : (exercises ? exercises[currentIdx] : null);
 
   // Dynamic prompt based on module
   let prompt = S.exercise.promptSolve;
-  if (moduleId === 'isolateVariable' && exercise?.targetVar) {
-    prompt = S.exercise.promptFindVar(exercise.targetVar);
+  if (moduleId === 'isolateVariable' && currentExercise?.targetVar) {
+    prompt = S.exercise.promptFindVar(currentExercise.targetVar);
   } else if (moduleId === 'simplifyExpression') {
     prompt = 'Упрости выражение';
-  } else if (moduleId === 'moveAdditive' && exercise?.targetVar) {
-    prompt = S.exercise.promptFindVar(exercise.targetVar);
+  } else if (moduleId === 'moveAdditive' && currentExercise?.targetVar) {
+    prompt = S.exercise.promptFindVar(currentExercise.targetVar);
   } else {
     prompt = promptForModule[moduleId] || S.exercise.promptSolve;
   }
 
-  const advanceExercise = useCallback(() => {
-    if (currentIdx < exercises.length - 1) {
-      setCurrentIdx((i) => i + 1);
+  // Generate next exercise (infinite mode)
+  const advanceToNext = useCallback(() => {
+    if (isNewModule) {
+      setExercise(generateNextExercise(moduleId, difficultyLevel));
     } else {
-      setCompleted(true);
+      if (currentIdx < exercises.length - 1) {
+        setCurrentIdx((i) => i + 1);
+      } else {
+        setCompleted(true);
+      }
     }
-  }, [currentIdx, exercises.length]);
+  }, [isNewModule, moduleId, difficultyLevel, currentIdx, exercises]);
 
-  const resetRunWith = useCallback((nextExercises) => {
-    setExercises(nextExercises);
-    setCurrentIdx(0);
-    setFeedback(null);
-    setRulePopup(null);
-    setCompleted(false);
-    setSolvedCount(0);
-  }, []);
-
-  const handleSimplifyDifficultyChange = useCallback(
-    (nextDifficulty) => {
-      if (nextDifficulty === simplifyDifficulty) return;
-      setSimplifyDifficulty(nextDifficulty);
-      const nextExercises = buildExerciseSet(moduleId, exerciseCount, nextDifficulty);
-      resetRunWith(nextExercises);
+  const handleDifficultyChange = useCallback(
+    (nextLevel) => {
+      if (nextLevel === difficultyLevel) return;
+      setDifficultyLevel(nextLevel);
+      setSolvedCount(0);
+      setFeedback(null);
+      setRulePopup(null);
+      setExercise(generateNextExercise(moduleId, nextLevel));
     },
-    [simplifyDifficulty, moduleId, exerciseCount, resetRunWith]
+    [difficultyLevel, moduleId]
   );
 
   const handleAction = useCallback(
     (action) => {
-      if (action.type === 'expressionUpdate') {
-        const newExercises = [...exercises];
-        newExercises[currentIdx] = { ...exercise, expr: action.expr };
-        setExercises(newExercises);
+      const ex = currentExercise;
+      if (!ex) return;
 
-        if (action.solved && !exercise.solved) {
+      if (action.type === 'expressionUpdate') {
+        if (isNewModule) {
+          setExercise({ ...ex, expr: action.expr });
+        } else {
+          const newExercises = [...exercises];
+          newExercises[currentIdx] = { ...ex, expr: action.expr };
+          setExercises(newExercises);
+        }
+
+        if (action.solved && !ex.solved) {
           setFeedback('success');
           setSolvedCount((c) => c + 1);
-          newExercises[currentIdx] = { ...exercise, expr: action.expr, solved: true };
-          setExercises(newExercises);
+          if (isNewModule) {
+            setExercise({ ...ex, expr: action.expr, solved: true });
+          } else {
+            const newExercises = [...exercises];
+            newExercises[currentIdx] = { ...ex, expr: action.expr, solved: true };
+            setExercises(newExercises);
+          }
           setTimeout(() => {
             setFeedback(null);
-            advanceExercise();
+            advanceToNext();
           }, 1400);
         }
         return;
@@ -132,19 +140,22 @@ export default function ExerciseScreen({ moduleId, onBack }) {
         return;
       }
 
-      const result = validate(exercise, action);
+      const result = validate(ex, action);
 
       if (result.valid) {
         // For moveAdditive with targetVar: check if we still need to divide by coefficient
-        if (action.type === 'moveAdditive' && exercise.targetVar && result.result?.type === 'equation') {
+        if (action.type === 'moveAdditive' && ex.targetVar && result.result?.type === 'equation') {
           const leftTerms = result.result.left;
           if (leftTerms.length === 1) {
             const varTerm = leftTerms[0];
-            if (varTerm.vars?.includes(exercise.targetVar) && varTerm.coeff > 1) {
-              // Step 1 done — variable isolated but still has coefficient. Transition to step 2.
-              const newExercises = [...exercises];
-              newExercises[currentIdx] = { ...exercise, expr: result.result, step: 2 };
-              setExercises(newExercises);
+            if (varTerm.vars?.includes(ex.targetVar) && varTerm.coeff > 1) {
+              if (isNewModule) {
+                setExercise({ ...ex, expr: result.result, step: 2 });
+              } else {
+                const newExercises = [...exercises];
+                newExercises[currentIdx] = { ...ex, expr: result.result, step: 2 };
+                setExercises(newExercises);
+              }
               setFeedback('success');
               setTimeout(() => setFeedback(null), 600);
               return;
@@ -159,11 +170,13 @@ export default function ExerciseScreen({ moduleId, onBack }) {
           const g = gcd(numC, denC);
 
           if (g > 1) {
-            // Not fully simplified yet -- update expression but DON'T advance
-            const newExercises = [...exercises];
-            newExercises[currentIdx] = { ...exercise, expr: result.result };
-            setExercises(newExercises);
-            // Brief success flash for correct step
+            if (isNewModule) {
+              setExercise({ ...ex, expr: result.result });
+            } else {
+              const newExercises = [...exercises];
+              newExercises[currentIdx] = { ...ex, expr: result.result };
+              setExercises(newExercises);
+            }
             setFeedback('success');
             setTimeout(() => setFeedback(null), 600);
             return;
@@ -174,17 +187,17 @@ export default function ExerciseScreen({ moduleId, onBack }) {
         setFeedback('success');
         setSolvedCount((c) => c + 1);
 
-        const newExercises = [...exercises];
-        newExercises[currentIdx] = {
-          ...exercise,
-          expr: result.result,
-          solved: true,
-        };
-        setExercises(newExercises);
+        if (isNewModule) {
+          setExercise({ ...ex, expr: result.result, solved: true });
+        } else {
+          const newExercises = [...exercises];
+          newExercises[currentIdx] = { ...ex, expr: result.result, solved: true };
+          setExercises(newExercises);
+        }
 
         setTimeout(() => {
           setFeedback(null);
-          advanceExercise();
+          advanceToNext();
         }, 1400);
       } else {
         setFeedback('error');
@@ -194,12 +207,15 @@ export default function ExerciseScreen({ moduleId, onBack }) {
         setTimeout(() => setFeedback(null), 600);
       }
     },
-    [exercise, exercises, currentIdx, advanceExercise]
+    [currentExercise, isNewModule, exercises, currentIdx, advanceToNext]
   );
 
   const handleSkip = useCallback(() => {
-    advanceExercise();
-  }, [advanceExercise]);
+    advanceToNext();
+  }, [advanceToNext]);
+
+  // Difficulty level colors from strings
+  const levels = S.exercise.difficultyLevels;
 
   return (
     <motion.div
@@ -245,15 +261,26 @@ export default function ExerciseScreen({ moduleId, onBack }) {
           {S.exercise.backToMenu}
         </motion.button>
 
-        <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#6b7280' }}>
-          {S.exercise.progress(currentIdx + 1, exercises.length)}
-        </span>
+        {/* Solved counter for new modules, progress for legacy */}
+        {isNewModule ? (
+          <motion.div
+            key={solvedCount}
+            initial={{ scale: 1.3, color: '#a855f7' }}
+            animate={{ scale: 1, color: '#6b7280' }}
+            transition={{ duration: 0.4 }}
+            style={{ fontSize: '0.95rem', fontWeight: 700 }}
+          >
+            {S.exercise.solvedCount(solvedCount)}
+          </motion.div>
+        ) : (
+          <span style={{ fontSize: '0.95rem', fontWeight: 700, color: '#6b7280' }}>
+            {S.exercise.progress(currentIdx + 1, exercises?.length || 0)}
+          </span>
+        )}
       </motion.div>
 
-      {/* Progress bar */}
-      <ProgressBar current={solvedCount} total={exercises.length} />
-
-      {moduleId === 'simplifyExpression' && (
+      {/* Difficulty level switcher — for new modules */}
+      {isNewModule && (
         <motion.div
           initial={{ opacity: 0, y: -8 }}
           animate={{ opacity: 1, y: 0 }}
@@ -265,59 +292,39 @@ export default function ExerciseScreen({ moduleId, onBack }) {
             borderRadius: '999px',
             background: 'rgba(255,255,255,0.62)',
             boxShadow: '0 2px 12px rgba(0,0,0,0.08)',
+            flexWrap: 'wrap',
+            justifyContent: 'center',
           }}
         >
           <span style={{ fontSize: '0.82rem', fontWeight: 700, color: '#64748b', marginLeft: '4px' }}>
-            {S.exercise.simplifyDifficulty}
+            {S.exercise.difficultyLabel}
           </span>
-          <motion.button
-            whileHover={{ scale: 1.04 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={() => handleSimplifyDifficultyChange('normal')}
-            style={{
-              borderRadius: '999px',
-              padding: '6px 14px',
-              fontSize: '0.82rem',
-              fontWeight: 700,
-              color: simplifyDifficulty === 'normal' ? '#ffffff' : '#475569',
-              background: simplifyDifficulty === 'normal' ? '#3b82f6' : 'rgba(255,255,255,0.8)',
-              border: '1px solid rgba(59,130,246,0.25)',
-            }}
-          >
-            {S.exercise.simplifyNormal}
-          </motion.button>
-          <motion.button
-            whileHover={{ scale: 1.04 }}
-            whileTap={{ scale: 0.96 }}
-            onClick={() => handleSimplifyDifficultyChange('hard')}
-            style={{
-              borderRadius: '999px',
-              padding: '6px 14px',
-              fontSize: '0.82rem',
-              fontWeight: 700,
-              color: simplifyDifficulty === 'hard' ? '#ffffff' : '#475569',
-              background: simplifyDifficulty === 'hard' ? '#0f766e' : 'rgba(255,255,255,0.8)',
-              border: '1px solid rgba(15,118,110,0.26)',
-            }}
-          >
-            {S.exercise.simplifyHard}
-          </motion.button>
+          {levels.map((lvl) => (
+            <motion.button
+              key={lvl.key}
+              whileHover={{ scale: 1.04 }}
+              whileTap={{ scale: 0.96 }}
+              onClick={() => handleDifficultyChange(lvl.key)}
+              style={{
+                borderRadius: '999px',
+                padding: '6px 14px',
+                fontSize: '0.82rem',
+                fontWeight: 700,
+                color: difficultyLevel === lvl.key ? '#ffffff' : '#475569',
+                background: difficultyLevel === lvl.key ? lvl.color : 'rgba(255,255,255,0.8)',
+                border: `1px solid ${lvl.color}40`,
+                cursor: 'pointer',
+              }}
+            >
+              {lvl.label}
+            </motion.button>
+          ))}
         </motion.div>
-      )}
-
-      {moduleId === 'simplifyExpression' && simplifyDifficulty === 'hard' && (
-        <motion.p
-          initial={{ opacity: 0 }}
-          animate={{ opacity: 1 }}
-          style={{ fontSize: '0.95rem', fontWeight: 600, color: '#0f766e' }}
-        >
-          {S.exercise.simplifyHardHint}
-        </motion.p>
       )}
 
       {/* Task prompt */}
       <motion.h2
-        key={`${currentIdx}-${simplifyDifficulty}`}
+        key={`${isNewModule ? solvedCount : currentIdx}-${difficultyLevel}`}
         initial={{ opacity: 0, y: 20 }}
         animate={{ opacity: 1, y: 0 }}
         transition={{ duration: 0.4 }}
@@ -332,9 +339,9 @@ export default function ExerciseScreen({ moduleId, onBack }) {
       </motion.h2>
 
       {/* Hint */}
-      {exercise?.hint && (
+      {currentExercise?.hint && (
         <motion.p
-          key={`hint-${currentIdx}`}
+          key={`hint-${isNewModule ? solvedCount : currentIdx}`}
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
           transition={{ delay: 0.5 }}
@@ -345,13 +352,13 @@ export default function ExerciseScreen({ moduleId, onBack }) {
             fontStyle: 'italic',
           }}
         >
-          {exercise.hint}
+          {currentExercise.hint}
         </motion.p>
       )}
 
       {/* Exercise area */}
       <motion.div
-        key={`exercise-${currentIdx}-${simplifyDifficulty}`}
+        key={`exercise-${isNewModule ? solvedCount : currentIdx}-${difficultyLevel}`}
         initial={{ opacity: 0, scale: 0.95 }}
         animate={{ opacity: 1, scale: 1 }}
         transition={spring}
@@ -365,27 +372,27 @@ export default function ExerciseScreen({ moduleId, onBack }) {
         }}
       >
         {/* New modules with ExpressionView */}
-        {exercise && (moduleId === 'isolateVariable' || moduleId === 'simplifyExpression') && (
+        {currentExercise && (moduleId === 'isolateVariable' || moduleId === 'simplifyExpression') && (
           <ExpressionView
-            exercise={exercise}
+            exercise={currentExercise}
             onAction={handleAction}
             showEquals={moduleId === 'isolateVariable'}
-            simplifyDifficulty={simplifyDifficulty}
+            simplifyDifficulty={difficultyLevel >= 3 ? 'hard' : 'normal'}
           />
         )}
 
         {/* Legacy modules */}
-        {exercise && moduleId === ADDITIVE_MODULE && (!exercise.step || exercise.step === 1) && (
-          <Equation exercise={exercise} onAction={handleAction} />
+        {currentExercise && moduleId === ADDITIVE_MODULE && (!currentExercise.step || currentExercise.step === 1) && (
+          <Equation exercise={currentExercise} onAction={handleAction} />
         )}
-        {exercise && moduleId === ADDITIVE_MODULE && exercise.step === 2 && (
-          <MultiplicativeEquation exercise={exercise} onAction={handleAction} />
+        {currentExercise && moduleId === ADDITIVE_MODULE && currentExercise.step === 2 && (
+          <MultiplicativeEquation exercise={currentExercise} onAction={handleAction} />
         )}
-        {exercise && moduleId === MULTIPLICATIVE_MODULE && (
-          <MultiplicativeEquation exercise={exercise} onAction={handleAction} />
+        {currentExercise && moduleId === MULTIPLICATIVE_MODULE && (
+          <MultiplicativeEquation exercise={currentExercise} onAction={handleAction} />
         )}
-        {exercise && FRACTION_MODULES.has(moduleId) && (
-          <FractionExercise exercise={exercise} onAction={handleAction} />
+        {currentExercise && FRACTION_MODULES.has(moduleId) && (
+          <FractionExercise exercise={currentExercise} onAction={handleAction} />
         )}
       </motion.div>
 
@@ -419,10 +426,12 @@ export default function ExerciseScreen({ moduleId, onBack }) {
         />
       )}
 
-      {/* Celebration */}
-      <AnimatePresence>
-        {completed && <Celebration onContinue={onBack} />}
-      </AnimatePresence>
+      {/* Celebration — only for legacy modules with finite sets */}
+      {!isNewModule && (
+        <AnimatePresence>
+          {completed && <Celebration onContinue={onBack} />}
+        </AnimatePresence>
+      )}
     </motion.div>
   );
 }

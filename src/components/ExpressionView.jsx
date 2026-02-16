@@ -135,7 +135,21 @@ export default function ExpressionView({ exercise, onAction, simplifyDifficulty 
       const previewSide = dragPreview?.pieceId === piece.id ? dragPreview.toSide : null;
       const directSide = getPreviewSideFromPoint(point, from.side, leftRect, rightRect, equalsRect);
       const toSide = !previewSide || previewSide === from.side ? directSide : previewSide;
+
+      // Same-side drop: try expand or factor out
       if (!toSide || toSide === from.side) {
+        const targetPieceId = findPieceAtPoint(point, piece.id, pieceRefs.current);
+        if (targetPieceId) {
+          const sameSideResult = trySameSideEquationOp(exercise.expr, from.side, piece.id, targetPieceId);
+          if (sameSideResult) {
+            const normalized = maybeNormalizeNegativeTarget(sameSideResult, exercise.targetVar);
+            const solved = isIsolateSolved(normalized, exercise.targetVar);
+            registerValidMove(solved);
+            onAction({ type: 'expressionUpdate', expr: normalized, solved });
+            clearDragUiState();
+            return;
+          }
+        }
         registerIllegalMove();
         clearDragUiState();
         return;
@@ -145,6 +159,14 @@ export default function ExpressionView({ exercise, onAction, simplifyDifficulty 
       const moveMeta = resolveEquationMove(source, from.index);
       if (!moveMeta) {
         registerIllegalMove();
+        clearDragUiState();
+        return;
+      }
+
+      // Block moving the target variable across the equals sign
+      const otherSide = from.side === 'left' ? exercise.expr.right?.[0]?.pieces || [] : exercise.expr.left?.[0]?.pieces || [];
+      if (exercise.targetVar && moveContainsTargetVar(source, otherSide, moveMeta, exercise.targetVar)) {
+        registerIllegalMove('Мы ищем значение этой переменной! Её нужно оставить на месте. Перенеси другой элемент.');
         clearDragUiState();
         return;
       }
@@ -250,7 +272,7 @@ export default function ExpressionView({ exercise, onAction, simplifyDifficulty 
   const hintText = useMemo(() => {
     if (exercise.hint) return exercise.hint;
     if (exercise.module === 'isolateVariable') {
-      return `Тебе нужно выразить переменную "${exercise.targetVar}". Перетаскивай подсвеченные блоки: в сумме переносится целый член, а в одиночном произведении — отдельные множители.`;
+      return `Тебе нужно выразить переменную "${exercise.targetVar}". Перетаскивай блоки через "=": в сумме переносится целый член, а в одиночном произведении — отдельные множители. Ещё можно раскрыть скобки (перетащи множитель на скобки) или вынести общий множитель (перетащи переменную на такую же в другом слагаемом).`;
     }
     if (exercise.module === 'simplifyExpression') {
       if (simplifyDifficulty === 'hard') {
@@ -1153,6 +1175,44 @@ function isMovablePiece(piece) {
   return piece?.type === 'number' || piece?.type === 'variable';
 }
 
+/**
+ * Check if moving this range should be blocked to protect the target variable.
+ *
+ * Rules:
+ * - Multiplicative moves: block only if the factor IS the bare target variable
+ *   (single piece). Paren groups like (x+b) in denominator are allowed.
+ * - Additive moves: block if the term contains the target AND the target does NOT
+ *   appear on the other side. When target is on both sides, moving a target-
+ *   containing term is valid algebra (consolidating like terms).
+ */
+function moveContainsTargetVar(source, otherSide, moveMeta, targetVar) {
+  if (!targetVar || !moveMeta?.moveRange) return false;
+  const { start, end } = moveMeta.moveRange;
+
+  if (moveMeta.moveType === 'mul') {
+    if (start === end) {
+      const p = source[start];
+      if (p?.type === 'variable' && p.name === targetVar) return true;
+    }
+    return false;
+  }
+
+  let targetInRange = false;
+  for (let i = start; i <= end; i += 1) {
+    if (source[i]?.type === 'variable' && source[i].name === targetVar) {
+      targetInRange = true;
+      break;
+    }
+  }
+  if (!targetInRange) return false;
+
+  if (Array.isArray(otherSide) && otherSide.some((p) => p?.type === 'variable' && p.name === targetVar)) {
+    return false;
+  }
+
+  return true;
+}
+
 function shouldShowSign(pieces, index) {
   const current = pieces[index];
   if (!current || !isMovablePiece(current)) return false;
@@ -1668,6 +1728,333 @@ function wrapSideForWholeOperation(sidePieces) {
     ...sidePieces.map((p) => ({ ...p })),
     makePiece({ type: 'paren', value: ')' }),
   ];
+}
+
+// ============================================================================
+// Same-side equation operations: Expand (distribute) and Factor out
+// ============================================================================
+
+/**
+ * Try a same-side operation (expand product or factor out variable).
+ * Returns updated equation or null.
+ */
+function trySameSideEquationOp(expr, side, dragPieceId, targetPieceId) {
+  const updated = JSON.parse(JSON.stringify(expr));
+  const pieces = side === 'left' ? updated.left?.[0]?.pieces || [] : updated.right?.[0]?.pieces || [];
+
+  // Try expand: drag a factor onto a paren group (or vice versa) in the same multiplicative term
+  const expandResult = tryExpandProduct(pieces, dragPieceId, targetPieceId);
+  if (expandResult) {
+    if (side === 'left') {
+      updated.left[0].pieces = normalizeSide(expandResult);
+    } else {
+      updated.right[0].pieces = normalizeSide(expandResult);
+    }
+    return updated;
+  }
+
+  // Try factor out: drag a variable onto the same variable in another additive term
+  const factorResult = tryFactorOut(pieces, dragPieceId, targetPieceId);
+  if (factorResult) {
+    if (side === 'left') {
+      updated.left[0].pieces = normalizeSide(factorResult);
+    } else {
+      updated.right[0].pieces = normalizeSide(factorResult);
+    }
+    return updated;
+  }
+
+  return null;
+}
+
+/**
+ * Expand / distribute: A * (B + C) → A*B + A*C
+ *
+ * The user drags a factor and drops it onto a parenthesized group (or vice versa).
+ * Both must be top-level factors in the same multiplicative term.
+ *
+ * Returns new pieces array or null.
+ */
+function tryExpandProduct(pieces, dragPieceId, targetPieceId) {
+  // Find which pieces were involved
+  const dragIdx = pieces.findIndex((p) => p.id === dragPieceId);
+  const targetIdx = pieces.findIndex((p) => p.id === targetPieceId);
+  if (dragIdx < 0 || targetIdx < 0) return null;
+
+  // Both must be in the same additive term
+  const dragTermRange = getAdditiveTermRangeForIndex(pieces, dragIdx);
+  const targetTermRange = getAdditiveTermRangeForIndex(pieces, targetIdx);
+  if (!dragTermRange || !targetTermRange) return null;
+  if (dragTermRange.start !== targetTermRange.start || dragTermRange.end !== targetTermRange.end) return null;
+
+  // Extract the term pieces
+  const termPieces = pieces.slice(dragTermRange.start, dragTermRange.end + 1);
+  const termOffset = dragTermRange.start;
+
+  // Parse factors within this term
+  const factors = parseTopLevelFactorsWithRoles(termPieces);
+  if (!factors || factors.length < 2) return null;
+
+  // Identify which factor is the paren group (to expand into) and which is "the rest"
+  const dragFactor = findFactorContainingIndex(factors, dragIdx - termOffset);
+  const targetFactor = findFactorContainingIndex(factors, targetIdx - termOffset);
+  if (!dragFactor || !targetFactor || dragFactor === targetFactor) return null;
+
+  // One of them must be a paren group with inner additive terms
+  let parenFactor = null;
+  let otherFactorIndices = [];
+  const dragIsParen = isParenGroupFactor(termPieces, dragFactor);
+  const targetIsParen = isParenGroupFactor(termPieces, targetFactor);
+
+  if (targetIsParen && targetFactor.role !== 'den') {
+    parenFactor = targetFactor;
+  } else if (dragIsParen && dragFactor.role !== 'den') {
+    parenFactor = dragFactor;
+  } else {
+    return null; // Neither is a valid (numerator) paren group
+  }
+
+  // Get inner terms of the paren group (without outer parens)
+  const innerPieces = termPieces.slice(parenFactor.start + 1, parenFactor.end);
+  const innerTermRanges = getTopLevelTermRanges(innerPieces);
+  if (innerTermRanges.length < 2) return null; // Must have at least 2 terms to distribute
+
+  // Collect all OTHER factors (not the paren group)
+  const otherFactors = factors.filter((f) => f !== parenFactor);
+  if (otherFactors.length === 0) return null;
+
+  // Build the "coefficient" pieces from other factors (preserving their mul/div relationships)
+  const coeffPieces = buildFactorProductPieces(termPieces, otherFactors);
+
+  // For each inner term, create: coeff * innerTerm
+  const resultPieces = [];
+  for (let t = 0; t < innerTermRanges.length; t += 1) {
+    const range = innerTermRanges[t];
+    const innerTerm = innerPieces.slice(range.start, range.end + 1).map((p) => ({ ...p }));
+
+    // Determine the additive sign of this inner term
+    const leadPiece = innerTerm.find(isMovablePiece);
+    const innerSign = leadPiece?.sign === '-' ? '-' : '+';
+
+    // Clone coefficient pieces
+    const coeffClone = coeffPieces.map((p) => ({ ...p, id: makePiece(p).id }));
+
+    // Set sign on first movable piece of coeff: combine coeff sign with inner term sign
+    const coeffLead = coeffClone.find(isMovablePiece);
+    if (coeffLead) {
+      const coeffSign = coeffLead.sign === '-' ? '-' : '+';
+      // Multiply signs: (+)(+)=+, (+)(-)=-, (-)(+)=-, (-)(-)=+
+      coeffLead.sign = coeffSign === innerSign ? '+' : '-';
+    }
+
+    // Strip sign from inner term's leading piece (it's now carried by the coeff)
+    if (leadPiece) {
+      leadPiece.sign = '';
+    }
+
+    // Build: coeffClone * innerTerm (strip inner term sign since it's on coeff)
+    if (t > 0 || resultPieces.length > 0) {
+      // Already have pieces, the sign on coeffLead handles the addition
+    }
+    resultPieces.push(...coeffClone);
+    resultPieces.push(makePiece({ type: 'operator', value: '*', sign: '+' }));
+    resultPieces.push(...innerTerm);
+  }
+
+  if (!resultPieces.length) return null;
+
+  // Rebuild the full side: replace the original term with expanded terms, keep other terms
+  const before = pieces.slice(0, dragTermRange.start).map((p) => ({ ...p }));
+  const after = pieces.slice(dragTermRange.end + 1).map((p) => ({ ...p }));
+  const newPieces = [...before, ...resultPieces, ...after];
+
+  if (!isValidPieceSequence(newPieces)) return null;
+  return newPieces;
+}
+
+function findFactorContainingIndex(factors, localIndex) {
+  for (const f of factors) {
+    if (localIndex >= f.start && localIndex <= f.end) return f;
+  }
+  return null;
+}
+
+function isParenGroupFactor(termPieces, factor) {
+  return (
+    termPieces[factor.start]?.type === 'paren' &&
+    termPieces[factor.start]?.value === '(' &&
+    termPieces[factor.end]?.type === 'paren' &&
+    termPieces[factor.end]?.value === ')'
+  );
+}
+
+/**
+ * Build a pieces array that represents the product of the given factors.
+ * Preserves numerator/denominator roles.
+ */
+function buildFactorProductPieces(termPieces, factors) {
+  const result = [];
+  for (let i = 0; i < factors.length; i += 1) {
+    const f = factors[i];
+    const fPieces = termPieces.slice(f.start, f.end + 1).map((p) => ({ ...p }));
+    if (i > 0) {
+      const op = f.role === 'den' ? '/' : '*';
+      result.push(makePiece({ type: 'operator', value: op, sign: '+' }));
+    }
+    result.push(...fPieces);
+  }
+  return result;
+}
+
+/**
+ * Factor out common variable: A*x + B*x → (A+B)*x
+ *
+ * The user drags a variable from one additive term onto the same variable
+ * in a different additive term. All terms containing that variable get factored.
+ *
+ * Returns new pieces array or null.
+ */
+function tryFactorOut(pieces, dragPieceId, targetPieceId) {
+  const dragIdx = pieces.findIndex((p) => p.id === dragPieceId);
+  const targetIdx = pieces.findIndex((p) => p.id === targetPieceId);
+  if (dragIdx < 0 || targetIdx < 0) return null;
+
+  const dragPiece = pieces[dragIdx];
+  const targetPiece = pieces[targetIdx];
+
+  // Both must be the same variable
+  if (dragPiece.type !== 'variable' || targetPiece.type !== 'variable') return null;
+  if (dragPiece.name !== targetPiece.name) return null;
+
+  const commonVar = dragPiece.name;
+
+  // They must be in different additive terms
+  const dragTermRange = getAdditiveTermRangeForIndex(pieces, dragIdx);
+  const targetTermRange = getAdditiveTermRangeForIndex(pieces, targetIdx);
+  if (!dragTermRange || !targetTermRange) return null;
+  if (dragTermRange.start === targetTermRange.start) return null; // Same term
+
+  // Find ALL top-level additive terms that contain this variable as a factor
+  const allTermRanges = getTopLevelTermRanges(pieces);
+  const termsWithVar = [];
+  const termsWithout = [];
+
+  for (const range of allTermRanges) {
+    const termPieces = pieces.slice(range.start, range.end + 1);
+    const varInfo = extractVariableFactor(termPieces, commonVar);
+    if (varInfo) {
+      termsWithVar.push({ range, coeff: varInfo.coeffPieces, varSign: varInfo.varSign });
+    } else {
+      termsWithout.push(range);
+    }
+  }
+
+  if (termsWithVar.length < 2) return null; // Need at least 2 terms to factor
+
+  // Build the factored expression: (A + B + ...) * var
+  // Where A, B are the coefficients from each term
+  const innerPieces = [];
+  for (let i = 0; i < termsWithVar.length; i += 1) {
+    const { coeff } = termsWithVar[i];
+    if (i > 0) {
+      // The sign is already on the coeff's leading piece
+    }
+    innerPieces.push(...coeff.map((p) => ({ ...p, id: makePiece(p).id })));
+  }
+
+  // Determine overall sign for the factored term
+  const leadCoeff = innerPieces.find(isMovablePiece);
+  const factoredSign = leadCoeff?.sign === '-' ? '-' : '+';
+
+  // Build: (innerPieces) * commonVar
+  const factoredTerm = [];
+
+  // If multiple coeff terms, wrap in parens; signs stay on inner pieces
+  const innerTermCount = countTopLevelTerms(innerPieces);
+  if (innerTermCount > 1) {
+    factoredTerm.push(makePiece({ type: 'paren', value: '(' }));
+    factoredTerm.push(...innerPieces);
+    factoredTerm.push(makePiece({ type: 'paren', value: ')' }));
+  } else {
+    factoredTerm.push(...innerPieces);
+  }
+
+  factoredTerm.push(makePiece({ type: 'operator', value: '*', sign: '+' }));
+  factoredTerm.push(makePiece({ type: 'variable', name: commonVar, sign: '' }));
+
+  // Ensure the leading piece of factoredTerm has the right additive sign
+  const factoredLead = factoredTerm.find(isMovablePiece);
+  if (factoredLead && (!factoredLead.sign || factoredLead.sign === '')) {
+    factoredLead.sign = '+';
+  }
+
+  // Rebuild: factoredTerm + remaining terms (those without the variable)
+  const resultPieces = [...factoredTerm];
+  for (const range of termsWithout) {
+    resultPieces.push(...pieces.slice(range.start, range.end + 1).map((p) => ({ ...p })));
+  }
+
+  if (!isValidPieceSequence(resultPieces)) return null;
+  return resultPieces;
+}
+
+/**
+ * Extract the coefficient of a variable from a multiplicative term.
+ * E.g., for term "3 * x" with commonVar "x", returns { coeffPieces: [3], varSign: '+' }
+ * E.g., for term "-x" returns { coeffPieces: [-1], varSign: '-' }
+ * Returns null if the variable is not a top-level factor in this term.
+ */
+function extractVariableFactor(termPieces, commonVar) {
+  // Parse factors
+  const factors = parseTopLevelFactorsWithRoles(termPieces);
+  if (!factors) {
+    // Might be a single variable
+    if (termPieces.length === 1 && termPieces[0].type === 'variable' && termPieces[0].name === commonVar) {
+      const sign = termPieces[0].sign === '-' ? '-' : '+';
+      return {
+        coeffPieces: [makePiece({ type: 'number', value: 1, sign })],
+        varSign: sign,
+      };
+    }
+    return null;
+  }
+
+  // Find the variable factor
+  let varFactorIdx = -1;
+  for (let i = 0; i < factors.length; i += 1) {
+    const f = factors[i];
+    if (f.start === f.end && termPieces[f.start].type === 'variable' && termPieces[f.start].name === commonVar) {
+      varFactorIdx = i;
+      break;
+    }
+  }
+  if (varFactorIdx < 0) return null;
+
+  // The variable must be in numerator position
+  if (factors[varFactorIdx].role === 'den') return null;
+
+  // Build coefficient from remaining factors
+  const otherFactors = factors.filter((_, idx) => idx !== varFactorIdx);
+
+  // Get the additive sign of the whole term (from the first movable piece)
+  const leadPiece = termPieces.find(isMovablePiece);
+  const termSign = leadPiece?.sign === '-' ? '-' : '+';
+
+  if (otherFactors.length === 0) {
+    return {
+      coeffPieces: [makePiece({ type: 'number', value: 1, sign: termSign })],
+      varSign: termSign,
+    };
+  }
+
+  const coeffPieces = buildFactorProductPieces(termPieces, otherFactors);
+  // Set the additive sign on the coefficient's leading piece
+  const coeffLead = coeffPieces.find(isMovablePiece);
+  if (coeffLead) {
+    coeffLead.sign = termSign;
+  }
+
+  return { coeffPieces, varSign: termSign };
 }
 
 function normalizeSide(pieces) {
